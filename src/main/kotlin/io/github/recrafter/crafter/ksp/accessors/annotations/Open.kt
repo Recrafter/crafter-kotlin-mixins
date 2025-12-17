@@ -10,8 +10,12 @@ package io.github.recrafter.crafter.ksp.accessors.annotations
  *
  * @property target The name of the target field or method in the target class.
  */
-@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FUNCTION)
-@Retention(AnnotationRetention.SOURCE)
+@Target(
+    AnnotationTarget.PROPERTY,
+    AnnotationTarget.FUNCTION,
+)
+@Retention(AnnotationRetention.BINARY)
 annotation class Open(
     val target: String = "",
+    val isStatic: Boolean = false,
 )

@@ -9,13 +9,13 @@ import kotlin.reflect.KClass
  * The processor generates a mixin interface and the corresponding Kotlin bindings for
  * the specified [target] class.
  *
+ * @property target  The class that this accessor refers to.
  * @property widener Optional fully qualified class name of a widener that exposes the target
  *                   if it is not accessible.
- * @property target  The class that this accessor refers to.
  */
 @Target(AnnotationTarget.CLASS)
-@Retention(AnnotationRetention.SOURCE)
+@Retention(AnnotationRetention.BINARY)
 annotation class KAccessor(
-    val widener: String = "",
     val target: KClass<*> = Any::class,
+    val widener: String = "",
 )
