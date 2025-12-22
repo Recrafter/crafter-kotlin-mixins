@@ -1,5 +1,4 @@
 import io.github.diskria.gradle.utils.extensions.getCatalogVersion
-import io.github.diskria.gradle.utils.extensions.implementation
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
