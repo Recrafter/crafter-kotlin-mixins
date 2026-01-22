@@ -1,19 +1,18 @@
 package io.github.recrafter.lapis.extensions.ksp
 
-import com.google.devtools.ksp.symbol.KSModifierListOwner
 import com.google.devtools.ksp.symbol.Modifier
 
-val KSModifierListOwner.isPublic: Boolean
+val KspModifierListOwner.isPublic: Boolean
     get() = !isPrivate && !isProtected && !isInternal
 
-val KSModifierListOwner.isPrivate: Boolean
+val KspModifierListOwner.isPrivate: Boolean
     get() = modifiers.contains(Modifier.PRIVATE)
 
-val KSModifierListOwner.isInternal: Boolean
+val KspModifierListOwner.isInternal: Boolean
     get() = modifiers.contains(Modifier.INTERNAL)
 
-val KSModifierListOwner.isProtected: Boolean
+val KspModifierListOwner.isProtected: Boolean
     get() = modifiers.contains(Modifier.PROTECTED)
 
-val KSModifierListOwner.isAbstract: Boolean
+val KspModifierListOwner.isAbstract: Boolean
     get() = modifiers.contains(Modifier.ABSTRACT)

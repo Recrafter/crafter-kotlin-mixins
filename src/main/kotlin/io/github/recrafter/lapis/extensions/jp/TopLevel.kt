@@ -66,10 +66,10 @@ inline fun <reified A : Annotation> buildJavaAnnotation(builder: JPAnnotationBui
 fun buildJavaCodeBlock(builder: JPCodeBlockBuilder.() -> Unit = {}): JPCodeBlock =
     JPCodeBlock.builder().apply(builder).build()
 
-fun buildJavaCast(to: KJTypeName, from: JPCodeBlock = JPCodeBlock.of("this")): JPCodeBlock =
+fun buildJavaCast(to: JPTypeName, from: JPCodeBlock = JPCodeBlock.of("this")): JPCodeBlock =
     buildJavaCodeBlock {
         add("((")
-        add("\$T", to.javaVersion)
+        add("\$T", to)
         add(") ")
         add(from)
         add(")")

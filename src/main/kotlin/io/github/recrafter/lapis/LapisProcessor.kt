@@ -1,9 +1,8 @@
 package io.github.recrafter.lapis
 
+import com.google.devtools.ksp.isAbstract
 import com.google.devtools.ksp.processing.CodeGenerator
-import com.google.devtools.ksp.processing.KSPLogger
 import com.google.devtools.ksp.processing.Resolver
-import com.google.devtools.ksp.symbol.KSValueParameter
 import com.llamalad7.mixinextras.expression.Definition
 import com.llamalad7.mixinextras.expression.Definitions
 import com.llamalad7.mixinextras.expression.Expression
@@ -17,460 +16,129 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation
 import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.asClassName
-import io.github.recrafter.lapis.annotations.accessors.AccessConstructor
-import io.github.recrafter.lapis.annotations.accessors.AccessField
-import io.github.recrafter.lapis.annotations.accessors.AccessMethod
-import io.github.recrafter.lapis.annotations.accessors.Accessor
-import io.github.recrafter.lapis.annotations.patches.Patch
-import io.github.recrafter.lapis.annotations.patches.hooks.Hook
-import io.github.recrafter.lapis.annotations.patches.hooks.Kind
-import io.github.recrafter.lapis.annotations.patches.hooks.Method
-import io.github.recrafter.lapis.annotations.patches.hooks.Original
-import io.github.recrafter.lapis.api.patches.LapisPatch
+import io.github.recrafter.lapis.api.*
+import io.github.recrafter.lapis.api.annotations.*
+import io.github.recrafter.lapis.config.mixins.MixinConfig
 import io.github.recrafter.lapis.extensions.addIfNotNull
 import io.github.recrafter.lapis.extensions.atName
+import io.github.recrafter.lapis.extensions.capitalizeWithPrefix
+import io.github.recrafter.lapis.extensions.common.nameOfCallable
 import io.github.recrafter.lapis.extensions.common.nullIfNot
+import io.github.recrafter.lapis.extensions.common.unsafeLazy
 import io.github.recrafter.lapis.extensions.jp.*
 import io.github.recrafter.lapis.extensions.kp.*
 import io.github.recrafter.lapis.extensions.ksp.*
-import io.github.recrafter.lapis.extensions.prefixed
-import io.github.recrafter.lapis.extensions.psi.PsiCallable
+import io.github.recrafter.lapis.extensions.psi.PsiCallExpression
+import io.github.recrafter.lapis.extensions.psi.PsiCallableExpression
+import io.github.recrafter.lapis.extensions.psi.calleeName
 import io.github.recrafter.lapis.extensions.psi.findPsiFunction
 import io.github.recrafter.lapis.kj.KJClassName
 import io.github.recrafter.lapis.kj.KJTypeName
 import io.github.recrafter.lapis.utils.Descriptors
 import io.github.recrafter.lapis.utils.NonDeferringProcessor
-import io.github.recrafter.lapis.utils.PsiHelper
+import io.github.recrafter.lapis.utils.PsiCompanion
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.jetbrains.kotlin.utils.addToStdlib.UnsafeCastFunction
+import org.jetbrains.kotlin.utils.addToStdlib.safeAs
 import org.spongepowered.asm.mixin.*
+import org.spongepowered.asm.mixin.gen.Accessor
 import org.spongepowered.asm.mixin.gen.Invoker
 import org.spongepowered.asm.mixin.injection.*
+import javax.annotation.processing.Generated
 import javax.lang.model.element.Modifier
 import kotlin.reflect.KClass
-
-typealias AccessorAnnotation = org.spongepowered.asm.mixin.gen.Accessor
 
 internal class LapisProcessor(
     arguments: Map<String, String>,
     private val generator: CodeGenerator,
-    private val logger: KSPLogger,
+    private val logger: KspLogger,
 ) : NonDeferringProcessor() {
 
     private val modId: String by arguments
-    private val packageName: String by arguments
+    private val mixinsPackage: String by arguments
+    private val javaVersion: String by arguments
+    private val refmapFileName: String by arguments
 
-    private val accessors: MutableMap<KJClassName, GeneratedAccessor> = mutableMapOf()
-    private val patches: MutableMap<KJClassName, GeneratedPatch> = mutableMapOf()
+    private val psiCompanion: PsiCompanion = PsiCompanion(logger)
+
+    private val modPackage: String = mixinsPackage.substringBeforeLast(".")
+    private val generatedPackage: String = "$mixinsPackage.generated"
+
+    private val mixins: MutableMap<KJClassName, GeneratedMixin> = mutableMapOf()
 
     private val extensions: MutableMap<KJClassName, GeneratedExtension> = mutableMapOf()
     private val factories: MutableMap<KJClassName, GeneratedFactory> = mutableMapOf()
 
     private val wideners: MutableSet<String> = mutableSetOf()
 
+    private val configJson: Json by unsafeLazy {
+        Json { prettyPrint = true }
+    }
+
     override fun run(resolver: Resolver) {
-        resolveAccessors(resolver)
-        resolvePatches(resolver)
-    }
-
-    override fun finish() {
-        accessors.forEach { (className, accessor) ->
-            if (accessor.isEmpty()) {
-                return@forEach
-            }
-            buildJavaInterface(className.simpleName) {
-                addAnnotation<Mixin> {
-                    addClassMember(DEFAULT_ANNOTATION_ELEMENT_NAME, accessor.targetTypeName)
-                }
-                addModifiers(Modifier.PUBLIC)
-                addMethods(accessor.methods)
-            }.toJavaFile(className.packageName).writeTo(generator, accessor.symbols.toDependencies())
-        }
-        patches.forEach { (mixinClassName, patch) ->
-            if (patch.isEmpty()) {
-                return@forEach
-            }
-            buildKotlinClass(patch.implClassName.simpleName) {
-                val propertyName = LapisPatch<*>::target.name
-                setConstructor(propertyName to patch.targetTypeName)
-                addProperty(buildKotlinProperty(propertyName, patch.targetTypeName) {
-                    addModifiers(KModifier.OVERRIDE)
-                    initializer(propertyName)
-                })
-                setSuperClassType(patch.patchTypeName)
-            }.toKotlinFile(patch.implClassName.packageName) {
-
-            }.writeTo(generator, patch.symbols.toDependencies())
-            buildJavaClass(mixinClassName.simpleName) {
-                addAnnotation<Mixin> {
-                    addClassArrayMember(DEFAULT_ANNOTATION_ELEMENT_NAME, patch.targetTypeName)
-                }
-                addAnnotation<SuppressWarnings> {
-                    addStringMember(DEFAULT_ANNOTATION_ELEMENT_NAME, "DataFlowIssue")
-                }
-                addSuperinterface(patch.bridgeClassName.javaVersion)
-                val implFieldName = "patch"
-                val implGetterName = implFieldName.prefixed("getOrInit")
-                addField(buildJavaField(patch.implClassName.javaVersion, implFieldName) {
-                    addAnnotation<Unique>()
-                    addModifiers(Modifier.PRIVATE)
-                })
-                addMethod(buildJavaMethod(implGetterName) {
-                    addAnnotation<Unique>()
-                    addModifiers(Modifier.PRIVATE)
-                    setReturnType(patch.implClassName.javaVersion)
-                    addIfStatement(JPCodeBlock.of("$implFieldName == ${null.toString()}")) {
-                        val javaObject = KJClassName("java.lang", "Object")
-                        val objectCast = buildJavaCast(to = javaObject.typeName)
-                        val targetCast = buildJavaCast(to = patch.targetTypeName, from = objectCast)
-                        addStatement(
-                            "\$L = new \$T(\$L)",
-                            implFieldName,
-                            patch.implClassName.javaVersion,
-                            targetCast
-                        )
-                    }
-                    addReturnStatement(implFieldName)
-                })
-                addMethods(patch.methods)
-            }.toJavaFile(mixinClassName.packageName).writeTo(generator, patch.symbols.toDependencies())
-        }
-        extensions.forEach { (className, extension) ->
-            if (extension.isEmpty()) {
-                return@forEach
-            }
-            buildKotlinFile(className.packageName, className.simpleName + "Ext") {
-                addAnnotation<Suppress> {
-                    addStringArrayMember(
-                        Suppress::names.name,
-                        listOf(
-                            "CAST_NEVER_SUCCEEDS",
-                            "NOTHING_TO_INLINE",
-                            "UnusedImport",
-                            "UnusedReceiverParameter",
-                            "RedundantVisibilityModifier",
-                            "unused",
-                        )
-                    )
-                }
-                extension.typeAliases.forEach {
-                    addTypeAlias(it)
-                }
-                addFunctions(extension.topLevelFunctions)
-                addProperties(extension.properties)
-                addFunctions(extension.functions)
-            }.writeTo(generator, extension.symbols.toDependencies())
-        }
-        factories.forEach { (className, factory) ->
-            if (factory.isEmpty()) {
-                return@forEach
-            }
-            buildKotlinObject(className.simpleName) {
-                addProperties(factory.properties)
-                addFunctions(factory.functions)
-            }.toKotlinFile(className.packageName) {
-                addAnnotation<Suppress> {
-                    addStringArrayMember(
-                        Suppress::names.name,
-                        listOf(
-                            "CAST_NEVER_SUCCEEDS",
-                            "UnusedImport",
-                            "RedundantVisibilityModifier",
-                            "unused",
-                        )
-                    )
-                }
-            }.writeTo(generator, factory.symbols.toDependencies())
-        }
-        generator.createResourceFile(
-            path = "META-INF/lapis/wideners.txt",
-            contents = wideners.joinToString("\n"),
-            aggregating = true,
-        )
-        reset()
-    }
-
-    override fun onError() {
-        reset()
-    }
-
-    private fun resolveAccessors(resolver: Resolver) {
-        resolver.forEachSymbolsAnnotatedWith<Accessor> { symbol, accessor, annotation ->
-            logger.kspRequire(symbol is KspClass && symbol.isInterface, symbol) {
-                "Annotation ${Accessor::class.atName} can only be applied to interfaces."
-            }
-            logger.kspRequire(symbol.superInterfaceTypes.isEmpty(), symbol) {
-                "Interface annotated with ${Accessor::class.atName} must not extends interfaces."
+        resolver.forEachSymbolsAnnotatedWith<Patch> { symbol, patch, annotation ->
+            logger.require(symbol is KspClass && symbol.isClass && symbol.isAbstract, symbol) {
+                "Annotation ${Patch::class.atName} can only be applied to abstract classes."
             }
             symbol.parentDeclaration?.let { parent ->
-                logger.kspRequire(parent is KspClass && parent.isInterface, symbol) {
-                    "Interface annotated with ${Accessor::class.atName} must be nested inside another interface."
+                val parentPatchAnnotation = parent.getSingleAnnotationOrNull<Patch>()
+                logger.require(parent is KspClass && parent.isClass && parentPatchAnnotation != null, symbol) {
+                    "Inner classes are only allowed if they are also ${Patch::class.atName} classes."
                 }
-                val parentAccessorAnnotation = parent.getSingleAnnotationOrNull<Accessor>()
-                logger.kspRequire(parentAccessorAnnotation != null, symbol) {
-                    "Outer interface '${parent.name}' must be annotated with ${Accessor::class.atName} " +
-                        "to contain nested ${Accessor::class.atName} interfaces."
-                }
-                if (accessor.widener.isNotEmpty()) {
-                    logger.kspRequire(parentAccessorAnnotation.widener.isNotEmpty(), symbol) {
-                        "Outer interface '${parent.name}' must be have non-empty ${Accessor::widener.name} parameter " +
-                            "to contain nested ${Accessor::widener.name} parameter."
+                if (patch.widener.isNotEmpty()) {
+                    logger.require(parentPatchAnnotation.widener.isNotEmpty(), parent) {
+                        "Outer patch must be have non-empty ${Patch::widener.name} parameter " +
+                            "to contain nested ${Patch::widener.name} parameter."
                     }
                 }
             }
-            val targetClassName = annotation.getClassDeclarationArgument(Accessor::target.name).asKJClassName()
-            if (accessor.widener.isNotEmpty()) {
+            if (patch.widener.isNotEmpty()) {
                 wideners += if (symbol.parentDeclaration != null) {
                     generateSequence(symbol) { it.parentDeclaration as? KspClass }
                         .toList()
-                        .mapNotNull { it.getSingleAnnotationOrNull<Accessor>() }
+                        .mapNotNull { it.getSingleAnnotationOrNull<Patch>() }
                         .asReversed()
                         .joinToString("$") { it.widener.removePrefix(".") }
                 } else {
-                    accessor.widener
+                    patch.widener
                 }
             }
 
-            val mixinClassName = KJClassName(symbol.packageName.asString(), symbol.name + "_Mixin")
-            val mixinCast = buildKotlinCast(to = mixinClassName)
-            val factoryClassName = KJClassName(targetClassName.packageName, targetClassName.simpleName + "KFactory")
-
-            val mixinMethods = mutableListOf<JPMethod>()
-            val topLevelFunctions = mutableListOf<KPFunction>()
-            val extensionProperties = mutableListOf<KPProperty>()
-            val extensionFunctions = mutableListOf<KPFunction>()
-            val factoryProperties = mutableListOf<KPProperty>()
-            val factoryFunctions = mutableListOf<KPFunction>()
-
-            symbol.declarations.forEach { declaration ->
-                when {
-                    declaration is KspProperty -> {
-                        val property = declaration
-                        restrictMixinAnnotations(property)
-                        val accessFieldAnnotation = property.getSingleAnnotationOrNull<AccessField>()
-                        logger.kspRequire(accessFieldAnnotation != null, property) {
-                            "Properties inside ${Accessor::class.atName} interfaces " +
-                                "must be annotated with ${AccessField::class.atName}."
-                        }
-                        logger.kspRequire(property.getter?.isAbstract == true, property) {
-                            "Properties inside ${Accessor::class.atName} interfaces must not declare a getter."
-                        }
-                        val propertyTypeName = property.type.asKJTypeName()
-                        val nameByUser = property.name
-                        val vanillaName = accessFieldAnnotation.vanillaName.ifEmpty { nameByUser }
-                        val accessorGetter = buildAccessorMethod(
-                            AccessorMethodType.GETTER,
-                            vanillaName,
-                            accessFieldAnnotation.isStatic,
-                            propertyTypeName,
-                            nameByUser
-                        )
-                        mixinMethods += accessorGetter
-                        val accessorSetter = nullIfNot(property.isMutable) {
-                            buildAccessorMethod(
-                                AccessorMethodType.SETTER,
-                                vanillaName,
-                                accessFieldAnnotation.isStatic,
-                                propertyTypeName,
-                                nameByUser,
-                            )
-                        }
-                        mixinMethods.addIfNotNull(accessorSetter)
-                        val factoryProperty = nullIfNot(accessFieldAnnotation.isStatic) {
-                            buildKotlinProperty(nameByUser, propertyTypeName) {
-                                getter(buildKotlinGetter {
-                                    addInvokeFunctionStatement(true, mixinClassName, accessorGetter.name())
-                                })
-                                if (accessorSetter != null) {
-                                    mutable(true)
-                                    setter(buildKotlinSetter {
-                                        setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
-                                        addInvokeFunctionStatement(
-                                            false, mixinClassName, accessorSetter.name(), listOf(SETTER_ARGUMENT_NAME)
-                                        )
-                                    })
-                                }
-                            }
-                        }
-                        factoryProperties.addIfNotNull(factoryProperty)
-                        extensionProperties += buildKotlinProperty(nameByUser, propertyTypeName) {
-                            setReceiverType(targetClassName)
-                            getter(buildKotlinGetter {
-                                addModifiers(KModifier.INLINE)
-                                if (factoryProperty != null) {
-                                    addGetterStatement(factoryClassName, factoryProperty.name)
-                                } else {
-                                    addInvokeFunctionStatement(true, mixinCast, accessorGetter.name())
-                                }
-                            })
-                            if (accessorSetter != null) {
-                                mutable(true)
-                                setter(buildKotlinSetter {
-                                    addModifiers(KModifier.INLINE)
-                                    setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
-                                    if (factoryProperty != null) {
-                                        addSetterStatement(factoryClassName, factoryProperty.name, SETTER_ARGUMENT_NAME)
-                                    } else {
-                                        addInvokeFunctionStatement(
-                                            true, mixinCast, accessorSetter.name(), listOf(SETTER_ARGUMENT_NAME)
-                                        )
-                                    }
-                                })
-                            }
-                        }
-                    }
-
-                    declaration is KspFunction -> {
-                        val function = declaration
-                        val nameByUser = function.name
-                        restrictMixinAnnotations(function)
-                        logger.kspRequire(function.isAbstract, function) {
-                            "Functions inside ${Accessor::class.atName} interfaces must not have a body."
-                        }
-                        val parameterList = function.parameters.asKJParameterList()
-                        val returnType = function.getReturnTypeOrNull()
-                        val hasReturnType = returnType != null
-                        val accessMethodAnnotation = function.getSingleAnnotationOrNull<AccessMethod>()
-                        val accessConstructorAnnotation = function.getSingleAnnotationOrNull<AccessConstructor>()
-                        when {
-                            accessMethodAnnotation != null && accessConstructorAnnotation == null -> {
-                                val invoker = buildInvokerMethod(
-                                    accessMethodAnnotation.vanillaName.ifEmpty { nameByUser },
-                                    accessMethodAnnotation.isStatic,
-                                    returnType,
-                                    nameByUser,
-                                    parameterList.javaVersion
-                                )
-                                mixinMethods += invoker
-
-                                val factoryFunction = nullIfNot(accessMethodAnnotation.isStatic) {
-                                    buildKotlinFunction(nameByUser) {
-                                        setParameters(parameterList.kotlinVersion)
-                                        addInvokeFunctionStatement(
-                                            hasReturnType, mixinClassName, invoker.name(), parameterList.names
-                                        )
-                                        setReturnType(returnType)
-                                    }
-                                }
-                                factoryFunctions.addIfNotNull(factoryFunction)
-
-                                extensionFunctions += buildKotlinFunction(nameByUser) {
-                                    addModifiers(KModifier.INLINE)
-                                    setReceiverType(targetClassName)
-                                    setParameters(parameterList.kotlinVersion)
-                                    if (factoryFunction != null) {
-                                        addInvokeFunctionStatement(
-                                            hasReturnType, factoryClassName, factoryFunction.name, parameterList.names
-                                        )
-                                    } else {
-                                        addInvokeFunctionStatement(
-                                            hasReturnType, mixinCast, invoker.name(), parameterList.names
-                                        )
-                                    }
-                                    setReturnType(returnType)
-                                }
-                            }
-
-                            accessConstructorAnnotation != null && accessMethodAnnotation == null -> {
-                                logger.kspRequire(!hasReturnType, function) {
-                                    "Functions annotated with ${AccessConstructor::class.atName} " +
-                                        "must not have a return type."
-                                }
-                                val invokerMethod = buildInvokerMethod(
-                                    Descriptors.CONSTRUCTOR_METHOD_NAME,
-                                    true,
-                                    targetClassName.typeName,
-                                    nameByUser,
-                                    parameterList.javaVersion
-                                )
-                                mixinMethods += invokerMethod
-                                val factoryFunction = buildKotlinFunction(nameByUser) {
-                                    setParameters(parameterList.kotlinVersion)
-                                    setReturnType(targetClassName)
-                                    addInvokeFunctionStatement(
-                                        true, mixinClassName, invokerMethod.name(), parameterList.names
-                                    )
-                                }
-                                factoryFunctions += factoryFunction
-                                topLevelFunctions += buildKotlinFunction(targetClassName.simpleName) {
-                                    addModifiers(KModifier.INLINE)
-                                    setParameters(parameterList.kotlinVersion)
-                                    setReturnType(targetClassName)
-                                    addInvokeFunctionStatement(
-                                        true, factoryClassName, factoryFunction.name, parameterList.names
-                                    )
-                                }
-                            }
-
-                            else -> {
-                                logger.kspError(declaration) {
-                                    "Functions inside ${Accessor::class.atName} interfaces " +
-                                        "must be annotated with " +
-                                        "${AccessMethod::class.atName} or ${AccessConstructor::class.atName}."
-                                }
-                            }
-                        }
-                    }
-
-                    declaration is KspClass && declaration.isInterface -> {
-                        val nestedInterface = declaration
-                        logger.kspRequire(nestedInterface.hasAnnotation<Accessor>(), nestedInterface) {
-                            "Nested interface '${nestedInterface.name}' " +
-                                "must be annotated with ${Accessor::class.atName}."
-                        }
-                    }
-
-                    else -> logger.kspError(declaration) {
-                        "Only properties, functions, and nested interfaces " +
-                            "are allowed inside ${Accessor::class.atName} interfaces."
-                    }
-                }
-            }
-            accumulateAccessor(mixinClassName, targetClassName.typeName) {
-                symbols += symbol
-                methods += mixinMethods
-            }
-            accumulateExtension(targetClassName) {
-                symbols += symbol
-                this.topLevelFunctions += topLevelFunctions
-                properties += extensionProperties
-                functions += extensionFunctions
-            }
-            accumulateFactory(factoryClassName) {
-                symbols += symbol
-                properties += factoryProperties
-                functions += factoryFunctions
-            }
-        }
-    }
-
-    private fun resolvePatches(resolver: Resolver) {
-        resolver.forEachSymbolsAnnotatedWith<Patch> { symbol, _, annotation ->
-            logger.kspRequire(symbol is KspClass && symbol.isClass, symbol) {
-                "Annotation ${Patch::class.atName} can only be applied to class."
-            }
-            logger.kspRequire(symbol.isAbstract, symbol) {
-                "Class annotated with ${Patch::class.atName} must be abstract."
-            }
-            val targetClassName = annotation.getClassDeclarationArgument(Patch::target.name).asKJClassName()
+            val targetClassName = annotation.getKspClassArgument(Patch::target.name).asKJClassName()
             val patchSuperType = symbol.getSuperClassTypeOrNull()
-            logger.kspRequire(patchSuperType?.declaration?.isInstance<LapisPatch<*>>() == true, symbol) {
+            logger.require(patchSuperType?.declaration?.isInstance<LapisPatch<*>>() == true, symbol) {
                 "Class annotated with ${Patch::class.atName} must extend ${LapisPatch::class.simpleName}."
             }
             val patchGenericType = patchSuperType.genericTypes().singleOrNull()?.asKJTypeName()
-            logger.kspRequire(patchGenericType == targetClassName.typeName, symbol) {
+            logger.require(patchGenericType == targetClassName.typeName, symbol) {
                 "${LapisPatch::class.simpleName} generic type " +
                     "does not match ${Patch::class.atName} ${Patch::target.name}."
             }
 
-            val patchPackageName = symbol.packageName.asString()
-            val implClassName = KJClassName(packageName, symbol.name + "_Impl")
-            val mixinClassName = KJClassName(patchPackageName, symbol.name + "_Mixin")
-            val bridgeClassName = KJClassName(packageName, symbol.name + "_Bridge")
-            val bridgeCast = buildKotlinCast(to = bridgeClassName)
+            val implClassName = KJClassName(modPackage, symbol.name + "_Impl")
+            val mixinClassName = KJClassName(generatedPackage, symbol.name + "_Mixin")
+            val accessorClassName = KJClassName(generatedPackage, symbol.name + "_Accessor")
+            val bridgeClassName = KJClassName(modPackage, symbol.name + "_Bridge")
+            val factoryClassName = KJClassName(modPackage, targetClassName.simpleName + "KFactory")
 
+            val thisToBridgeCast = buildKotlinCast(to = bridgeClassName)
+            val thisToAccessorCast = buildKotlinCast(to = accessorClassName)
+            val implTargetToAccessorCast = buildKotlinCast(
+                from = KPCodeBlock.of(LapisPatch<*>::target.name),
+                to = accessorClassName
+            )
+
+            val implProperties = mutableListOf<KPProperty>()
+            val implFunctions = mutableListOf<KPFunction>()
             val bridgeFunctions = mutableListOf<KPFunction>()
             val mixinMethods = mutableListOf<JPMethod>()
+            val accessorMethods = mutableListOf<JPMethod>()
             val extensionProperties = mutableListOf<KPProperty>()
             val extensionFunctions = mutableListOf<KPFunction>()
+            val factoryProperties = mutableListOf<KPProperty>()
+            val factoryFunctions = mutableListOf<KPFunction>()
+            val topLevelFunctions = mutableListOf<KPFunction>()
 
             val lazyPatchGetterCall = JPCodeBlock.of("getOrInitPatch()")
             symbol.properties.forEach { property ->
@@ -478,9 +146,106 @@ internal class LapisProcessor(
                 if (property.isPrivate) {
                     return@forEach
                 }
+                val accessAnnotation = property.getSingleAnnotationOrNull<Access>()
+                if (accessAnnotation != null) {
+                    logger.require(property.isAbstract(), property) {
+                        "Properties annotated with ${Access::class.atName} must be abstract."
+                    }
+                    val isStatic = property.hasAnnotation<Static>()
+                    val propertyTypeName = property.type.asKJTypeName()
+                    val nameByUser = property.name
+                    val vanillaName = accessAnnotation.vanillaName.ifEmpty { nameByUser }
+                    val accessorGetter = buildAccessorMethod(
+                        AccessorMethodType.GETTER,
+                        vanillaName,
+                        isStatic,
+                        propertyTypeName,
+                        nameByUser
+                    )
+                    accessorMethods += accessorGetter
+                    val accessorSetter = nullIfNot(property.isMutable) {
+                        buildAccessorMethod(
+                            AccessorMethodType.SETTER,
+                            vanillaName,
+                            isStatic,
+                            propertyTypeName,
+                            nameByUser,
+                        )
+                    }
+                    accessorMethods.addIfNotNull(accessorSetter)
+                    val factoryProperty = nullIfNot(isStatic) {
+                        buildKotlinProperty(nameByUser, propertyTypeName) {
+                            getter(buildKotlinGetter {
+                                addInvokeFunctionStatement(true, accessorClassName, accessorGetter.name())
+                            })
+                            if (accessorSetter != null) {
+                                mutable(true)
+                                setter(buildKotlinSetter {
+                                    setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
+                                    addInvokeFunctionStatement(
+                                        false, accessorClassName, accessorSetter.name(), listOf(SETTER_ARGUMENT_NAME)
+                                    )
+                                })
+                            }
+                        }
+                    }
+                    factoryProperties.addIfNotNull(factoryProperty)
+                    extensionProperties += buildKotlinProperty(nameByUser, propertyTypeName) {
+                        setReceiverType(targetClassName)
+                        getter(buildKotlinGetter {
+                            addModifiers(KModifier.INLINE)
+                            if (factoryProperty != null) {
+                                addGetterStatement(factoryClassName, factoryProperty.name)
+                            } else {
+                                addInvokeFunctionStatement(true, thisToAccessorCast, accessorGetter.name())
+                            }
+                        })
+                        if (accessorSetter != null) {
+                            mutable(true)
+                            setter(buildKotlinSetter {
+                                addModifiers(KModifier.INLINE)
+                                setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
+                                if (factoryProperty != null) {
+                                    addSetterStatement(factoryClassName, factoryProperty.name, SETTER_ARGUMENT_NAME)
+                                } else {
+                                    addInvokeFunctionStatement(
+                                        true, thisToAccessorCast, accessorSetter.name(), listOf(SETTER_ARGUMENT_NAME)
+                                    )
+                                }
+                            })
+                        }
+                    }
+                    implProperties += buildKotlinProperty(nameByUser, propertyTypeName) {
+                        addModifiers(KModifier.OVERRIDE)
+                        getter(buildKotlinGetter {
+                            if (factoryProperty != null) {
+                                addGetterStatement(factoryClassName, factoryProperty.name)
+                            } else {
+                                addInvokeFunctionStatement(true, implTargetToAccessorCast, accessorGetter.name())
+                            }
+                        })
+                        if (accessorSetter != null) {
+                            mutable(true)
+                            setter(buildKotlinSetter {
+                                setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
+                                if (factoryProperty != null) {
+                                    addSetterStatement(factoryClassName, factoryProperty.name, SETTER_ARGUMENT_NAME)
+                                } else {
+                                    addInvokeFunctionStatement(
+                                        true,
+                                        implTargetToAccessorCast,
+                                        accessorSetter.name(),
+                                        listOf(SETTER_ARGUMENT_NAME)
+                                    )
+                                }
+                            })
+                        }
+                    }
+                    return@forEach
+                }
                 val nameByUser = property.name
-                val getterName = nameByUser.prefixed("get")
-                val setterName = nameByUser.prefixed("set")
+                val getterName = nameByUser.capitalizeWithPrefix("get")
+                val setterName = nameByUser.capitalizeWithPrefix("set")
                 val bridgeGetterName = getterName.withModId()
                 val bridgeSetterName = setterName.withModId()
                 val propertyTypeName = property.type.asKJTypeName()
@@ -510,7 +275,7 @@ internal class LapisProcessor(
                     setReceiverType(targetClassName)
                     getter(buildKotlinGetter {
                         addModifiers(KModifier.INLINE)
-                        addInvokeFunctionStatement(true, bridgeCast, bridgeGetterName)
+                        addInvokeFunctionStatement(true, thisToBridgeCast, bridgeGetterName)
                     })
                     if (property.isMutable) {
                         mutable(true)
@@ -519,7 +284,7 @@ internal class LapisProcessor(
                             setParameters(SETTER_ARGUMENT_NAME to propertyTypeName)
                             addInvokeFunctionStatement(
                                 false,
-                                bridgeCast,
+                                thisToBridgeCast,
                                 bridgeSetterName,
                                 listOf(SETTER_ARGUMENT_NAME)
                             )
@@ -529,9 +294,106 @@ internal class LapisProcessor(
             }
             symbol.functions.forEach { function ->
                 restrictMixinAnnotations(function)
+                val accessAnnotation = function.getSingleAnnotationOrNull<Access>()
+                if (accessAnnotation != null) {
+                    logger.require(function.isAbstract, function) {
+                        "Functions annotated with ${Access::class.atName} must be abstract."
+                    }
+                    val nameByUser = function.name
+                    val parameterList = function.parameters.asKJParameterList()
+                    val returnType = function.getReturnTypeOrNull()
+                    val hasReturnType = returnType != null
+                    val isStatic = function.hasAnnotation<Static>()
+                    val isConstructor = function.hasAnnotation<Constructor>()
+                    if (isConstructor) {
+                        val invokerMethod = buildInvokerMethod(
+                            Descriptors.CONSTRUCTOR_METHOD_NAME,
+                            true,
+                            targetClassName.typeName,
+                            nameByUser,
+                            parameterList.javaVersion
+                        )
+                        accessorMethods += invokerMethod
+                        val factoryFunction = buildKotlinFunction(nameByUser) {
+                            setParameters(parameterList.kotlinVersion)
+                            setReturnType(targetClassName)
+                            addInvokeFunctionStatement(
+                                true, accessorClassName, invokerMethod.name(), parameterList.names
+                            )
+                        }
+                        factoryFunctions += factoryFunction
+                        topLevelFunctions += buildKotlinFunction(targetClassName.simpleName) {
+                            addModifiers(KModifier.INLINE)
+                            setParameters(parameterList.kotlinVersion)
+                            setReturnType(targetClassName)
+                            addInvokeFunctionStatement(
+                                true, factoryClassName, factoryFunction.name, parameterList.names
+                            )
+                        }
+                        implFunctions += buildKotlinFunction(nameByUser) {
+                            addModifiers(KModifier.OVERRIDE)
+                            setParameters(parameterList.kotlinVersion)
+                            setReturnType(targetClassName)
+                            addInvokeFunctionStatement(
+                                true, accessorClassName, invokerMethod.name(), parameterList.names
+                            )
+                        }
+                    } else {
+                        val invoker = buildInvokerMethod(
+                            accessAnnotation.vanillaName.ifEmpty { nameByUser },
+                            isStatic,
+                            returnType,
+                            nameByUser,
+                            parameterList.javaVersion
+                        )
+                        accessorMethods += invoker
+
+                        val factoryFunction = nullIfNot(isStatic) {
+                            buildKotlinFunction(nameByUser) {
+                                setParameters(parameterList.kotlinVersion)
+                                addInvokeFunctionStatement(
+                                    hasReturnType, accessorClassName, invoker.name(), parameterList.names
+                                )
+                                setReturnType(returnType)
+                            }
+                        }
+                        factoryFunctions.addIfNotNull(factoryFunction)
+
+                        extensionFunctions += buildKotlinFunction(nameByUser) {
+                            addModifiers(KModifier.INLINE)
+                            setReceiverType(targetClassName)
+                            setParameters(parameterList.kotlinVersion)
+                            if (factoryFunction != null) {
+                                addInvokeFunctionStatement(
+                                    hasReturnType, factoryClassName, factoryFunction.name, parameterList.names
+                                )
+                            } else {
+                                addInvokeFunctionStatement(
+                                    hasReturnType, thisToAccessorCast, invoker.name(), parameterList.names
+                                )
+                            }
+                            setReturnType(returnType)
+                        }
+                        implFunctions += buildKotlinFunction(nameByUser) {
+                            addModifiers(KModifier.OVERRIDE)
+                            setParameters(parameterList.kotlinVersion)
+                            if (factoryFunction != null) {
+                                addInvokeFunctionStatement(
+                                    hasReturnType, factoryClassName, factoryFunction.name, parameterList.names
+                                )
+                            } else {
+                                addInvokeFunctionStatement(
+                                    hasReturnType, implTargetToAccessorCast, invoker.name(), parameterList.names
+                                )
+                            }
+                            setReturnType(returnType)
+                        }
+                    }
+                    return@forEach
+                }
                 val hookAnnotation = function.getSingleAnnotationOrNull<Hook>()
                 if (hookAnnotation != null) {
-                    logger.kspRequire(function.isPublic, function) {
+                    logger.require(function.isPublic, function) {
                         "Functions annotated with ${Hook::class.atName} must be public."
                     }
                     mixinMethods += resolveHook(function, hookAnnotation, lazyPatchGetterCall)
@@ -558,134 +420,328 @@ internal class LapisProcessor(
                         setReceiverType(targetClassName)
                         setParameters(parameterList.kotlinVersion)
                         setReturnType(returnType)
-                        addInvokeFunctionStatement(hasReturnType, bridgeCast, bridgeName, parameterList.names)
+                        addInvokeFunctionStatement(hasReturnType, thisToBridgeCast, bridgeName, parameterList.names)
                     }
                     return@forEach
                 }
             }
-            buildKotlinInterface(bridgeClassName.simpleName) {
-                addFunctions(bridgeFunctions)
-            }.toKotlinFile(bridgeClassName.packageName) {
-                addAnnotation<Suppress> {
-                    addStringArrayMember(
-                        Suppress::names.name,
-                        listOf(
-                            "RedundantVisibilityModifier",
-                            "ClassName",
-                            "unused",
-                        )
-                    )
-                }
-            }.writeTo(generator, symbol.toDependencies())
-            accumulatePatch(
+            accumulateMixin(
+                patch.side,
                 mixinClassName,
+                accessorClassName,
                 targetClassName.typeName,
                 symbol.asKJClassName().typeName,
                 implClassName,
                 bridgeClassName,
             ) {
                 symbols += symbol
-                methods += mixinMethods
+                this.mixinMethods += mixinMethods
+                this.accessorMethods += accessorMethods
+                this.bridgeFunctions += bridgeFunctions
+                this.implProperties += implProperties
+                this.implFunctions += implFunctions
             }
             accumulateExtension(targetClassName) {
                 symbols += symbol
+                this.topLevelFunctions += topLevelFunctions
                 properties += extensionProperties
                 functions += extensionFunctions
+            }
+            accumulateFactory(factoryClassName) {
+                symbols += symbol
+                properties += factoryProperties
+                functions += factoryFunctions
             }
         }
     }
 
-    private fun resolveHook(function: KspFunction, hookAnnotation: Hook, lazyPatchGetterCall: JPCodeBlock): JPMethod {
-        val mixinMethodParameters = mutableListOf<JPParameter>()
-        val callArguments = arrayOfNulls<JPCodeBlock>(function.parameters.size)
-        val kind = hookAnnotation.kind
-        val methodParameter = function.parameters.singleOrNull { it.hasAnnotation<Method>() }
-        logger.kspRequire(methodParameter != null, function) {
-            "Functions annotated with ${Hook::class.atName} " +
-                "must have exactly one parameter annotated with ${Method::class.atName}."
-        }
-        val methodLambdaType = methodParameter.type.resolve()
-        logger.kspRequire(methodLambdaType.isFunctionType, methodParameter) {
-            "Hook parameters annotated with ${Method::class.atName} must be a non-suspend function type."
-        }
-        val methodLambdaGenericTypes = methodLambdaType.genericTypes().map { it.asKJTypeName() }
-        val methodLambdaReturnType = methodLambdaGenericTypes.last()
-        if (kind == Kind.Method) {
-            logger.kspRequire(function.parameters.none { it.hasAnnotation<Original>() }, methodParameter) {
-                "Hooks with ${kind.name} kind must not have parameters annotated with ${Original::class.atName}."
+    override fun finish() {
+        val mixinQualifiedNames = mutableMapOf<PatchSide, MutableList<String>>()
+        mixins.forEach { (mixinClassName, mixin) ->
+            if (mixin.accessorMethods.isNotEmpty()) {
+                buildJavaInterface(mixin.accessorClassName.simpleName) {
+                    addAnnotation<Mixin> {
+                        addClassMember(DEFAULT_ANNOTATION_ELEMENT_NAME, mixin.targetTypeName)
+                    }
+                    addModifiers(Modifier.PUBLIC)
+                    addMethods(mixin.accessorMethods)
+                }.toJavaFile(mixin.accessorClassName.packageName).writeTo(generator, mixin.symbols.toDependencies())
+                mixinQualifiedNames.getOrPut(mixin.side) { mutableListOf() }.add(mixin.accessorClassName.qualifiedName)
             }
-            mixinMethodParameters.addLast(
-                buildJavaParameter(
-                    Operation::class.asClassName().asKJClassName()
-                        .parameterizedBy(methodLambdaReturnType.boxed)
-                        .javaVersion,
-                    "_original"
-                )
-            )
-            callArguments[function.parameters.indexOf(methodParameter)] = JPCodeBlock.of("null")
-        } else {
-            val originalParameter = function.parameters.singleOrNull { it.hasAnnotation<Original>() }
-            logger.kspRequire(originalParameter != null, function) {
-                "Hooks with ${kind.name} kind must have exactly one parameter annotated with ${Original::class.atName}."
+            if (mixin.isEmpty()) {
+                return@forEach
             }
-            val originalType = originalParameter.type.resolve()
-            if (kind == Kind.Operation) {
-                logger.kspRequire(originalType.isFunctionType, originalParameter) {
-                    "Parameters annotated with ${Original::class.atName} in hooks with ${kind.name} kind " +
-                        "must be a non-suspend function type."
+            buildKotlinClass(mixin.implClassName.simpleName) {
+                val propertyName = LapisPatch<*>::target.name
+                setConstructor(propertyName to mixin.targetTypeName)
+                setSuperClassType(mixin.patchTypeName)
+                addProperty(buildKotlinProperty(propertyName, mixin.targetTypeName) {
+                    addModifiers(KModifier.OVERRIDE)
+                    initializer(propertyName)
+                })
+                addProperties(mixin.implProperties)
+                addFunctions(mixin.implFunctions)
+            }.toKotlinFile(mixin.implClassName.packageName) {
+                addAnnotation<Suppress> {
+                    addStringArrayMember(
+                        Suppress::names.name,
+                        listOf(
+                            "RedundantVisibilityModifier",
+                            "ClassName",
+                        )
+                    )
                 }
+            }.writeTo(generator, mixin.symbols.toDependencies())
+            if (mixin.bridgeFunctions.isNotEmpty()) {
+                buildKotlinInterface(mixin.bridgeClassName.simpleName) {
+                    addFunctions(mixin.bridgeFunctions)
+                }.toKotlinFile(mixin.bridgeClassName.packageName) {
+                    addAnnotation<Suppress> {
+                        addStringArrayMember(
+                            Suppress::names.name,
+                            listOf(
+                                "RedundantVisibilityModifier",
+                                "ClassName",
+                            )
+                        )
+                    }
+                }.writeTo(generator, mixin.symbols.toDependencies())
             }
-            callArguments[function.parameters.indexOf(methodParameter)] = JPCodeBlock.of("null")
+            buildJavaClass(mixinClassName.simpleName) {
+                addAnnotation<Mixin> {
+                    addClassArrayMember(DEFAULT_ANNOTATION_ELEMENT_NAME, mixin.targetTypeName)
+                }
+                addAnnotation<SuppressWarnings> {
+                    addStringMember(DEFAULT_ANNOTATION_ELEMENT_NAME, "DataFlowIssue")
+                }
+                if (mixin.bridgeFunctions.isNotEmpty()) {
+                    addSuperinterface(mixin.bridgeClassName.javaVersion)
+                }
+                val implFieldName = "patch"
+                val implGetterName = implFieldName.capitalizeWithPrefix("getOrInit")
+                addField(buildJavaField(mixin.implClassName.javaVersion, implFieldName) {
+                    addAnnotation<Unique>()
+                    addModifiers(Modifier.PRIVATE)
+                })
+                addMethod(buildJavaMethod(implGetterName) {
+                    addAnnotation<Unique>()
+                    addModifiers(Modifier.PRIVATE)
+                    setReturnType(mixin.implClassName.javaVersion)
+                    addIfStatement(JPCodeBlock.of("$implFieldName == ${null.toString()}")) {
+                        val objectCast = buildJavaCast(to = JPObject)
+                        val targetCast = buildJavaCast(to = mixin.targetTypeName.javaVersion, from = objectCast)
+                        addStatement(
+                            "\$L = new \$T(\$L)",
+                            implFieldName,
+                            mixin.implClassName.javaVersion,
+                            targetCast
+                        )
+                    }
+                    addReturnStatement(implFieldName)
+                })
+                addMethods(mixin.mixinMethods)
+            }.toJavaFile(mixinClassName.packageName).writeTo(generator, mixin.symbols.toDependencies())
+            mixinQualifiedNames.getOrPut(mixin.side) { mutableListOf() }.add(mixinClassName.qualifiedName)
         }
-        val signatureParameters = mutableListOf<KSValueParameter>()
-        callArguments.forEachIndexed { index, argument ->
-            if (argument == null) {
+        extensions.forEach { (className, extension) ->
+            if (extension.isEmpty()) {
+                return@forEach
+            }
+            buildKotlinFile(className.packageName, className.simpleName + "Ext") {
+                addAnnotation<Suppress> {
+                    addStringArrayMember(
+                        Suppress::names.name,
+                        listOf(
+                            "CAST_NEVER_SUCCEEDS",
+                            "NOTHING_TO_INLINE",
+                            "UnusedReceiverParameter",
+                            "RedundantVisibilityModifier",
+                            "unused",
+                        )
+                    )
+                }
+                extension.typeAliases.forEach {
+                    addTypeAlias(it)
+                }
+                addFunctions(extension.topLevelFunctions)
+                addProperties(extension.properties)
+                addFunctions(extension.functions)
+            }.writeTo(generator, extension.symbols.toDependencies())
+        }
+        factories.forEach { (className, factory) ->
+            if (factory.isEmpty()) {
+                return@forEach
+            }
+            buildKotlinObject(className.simpleName) {
+                addProperties(factory.properties)
+                addFunctions(factory.functions)
+            }.toKotlinFile(className.packageName) {
+                addAnnotation<Suppress> {
+                    addStringArrayMember(
+                        Suppress::names.name,
+                        listOf(
+                            "CAST_NEVER_SUCCEEDS",
+                            "RedundantVisibilityModifier",
+                            "unused",
+                        )
+                    )
+                }
+            }.writeTo(generator, factory.symbols.toDependencies())
+        }
+        generator.createResourceFile(
+            path = "wideners.txt",
+            contents = wideners.joinToString("\n"),
+            aggregating = true,
+        )
+        generator.createResourceFile(
+            path = "$modId.mixins.json",
+            contents = configJson.encodeToString(
+                MixinConfig.of(mixinsPackage, javaVersion.toInt(), refmapFileName, mixinQualifiedNames)
+            ),
+            aggregating = true,
+        )
+        reset()
+    }
+
+    override fun onError() {
+        reset()
+    }
+
+    @OptIn(UnsafeCastFunction::class)
+    private fun resolveHook(function: KspFunction, hookAnnotation: Hook, lazyPatchGetterCall: JPCodeBlock): JPMethod {
+        val handleParameter = function.parameters.singleOrNull {
+            it.hasAnnotation<Method>() || it.hasAnnotation<Constructor>()
+        }
+        logger.require(handleParameter != null, function) {
+            "Functions annotated with ${Hook::class.atName} " +
+                "must have exactly one parameter annotated " +
+                "with ${Method::class.atName} or ${Constructor::class.atName}."
+        }
+        val handleType = handleParameter.type.asKJTypeName().kotlinVersion.safeAs<KPParameterizedTypeName>()?.rawType
+        logger.require(handleType == Handle::class.asClassName(), handleParameter) {
+            "Hook parameters annotated with ${Method::class.atName} or ${Constructor::class.atName} " +
+                "must be a ${Handle::class.simpleName} type."
+        }
+        val handleRawType = handleType.asKJTypeName().javaVersion
+        val handleFunctionType = handleParameter.type.resolve().genericTypes().singleOrNull()
+        logger.require(handleFunctionType?.isFunctionType == true, handleParameter) {
+            "Hook parameters annotated with ${Method::class.atName} or ${Constructor::class.atName} " +
+                "must be a function type."
+        }
+        val psiParameters = psiCompanion.loadPsiFile(function)
+            .findPsiFunction { it.name == function.name }
+            ?.valueParameters
+        val psiHandleParameter = psiParameters?.firstOrNull { it.name == handleParameter.requireName() }
+        logger.require(psiHandleParameter != null, handleParameter) {
+            psiCompanion.resolvingError(handleParameter)
+        }
+        val psiHandleOfLambda = psiHandleParameter.defaultValue.safeAs<PsiCallExpression>()
+        val handleTopLevelFactoryName = nameOfCallable<(() -> () -> Unit) -> Handle<() -> Unit>> {
+            ::handleOf
+        }
+        logger.require(psiHandleOfLambda?.calleeName == handleTopLevelFactoryName, handleParameter) {
+            "Parameter ${handleParameter.requireName()} must have $handleTopLevelFactoryName { } in default value."
+        }
+        val psiHandleCallable = psiHandleOfLambda
+            .lambdaArguments
+            .singleOrNull()
+            ?.getLambdaExpression()
+            ?.bodyExpression
+            ?.statements
+            ?.singleOrNull()
+            ?.safeAs<PsiCallableExpression>()
+        logger.require(psiHandleCallable != null, handleParameter) {
+            "Parameter ${handleParameter.requireName()} " +
+                "must have callable reference inside $handleTopLevelFactoryName { ... } in default value."
+        }
+        val mixinMethodParameters = mutableListOf<JPParameter>()
+        val hookArgumentsArray = arrayOfNulls<HookArgument>(function.parameters.size)
+        val signatureParameters = mutableListOf<KspValueParameter>()
+
+        hookArgumentsArray[function.parameters.indexOf(handleParameter)] = NamedHookArgument(
+            handleRawType,
+            "_handle",
+            JPCodeBlock.of("\$T.of()", handleRawType)
+        )
+        val handleFunctionGenericTypes = handleFunctionType.genericTypes().map { it.asKJTypeName() }
+        val handleFunctionReturnType = handleFunctionGenericTypes.last()
+        function.parameters.forEachIndexed { index, argument ->
+            if (argument.annotations.toList().isEmpty()) {
                 val parameter = function.parameters[index]
-                callArguments[index] = JPCodeBlock.of(parameter.requireName())
+                hookArgumentsArray[index] = InlineHookArgument(JPCodeBlock.of(parameter.requireName()))
                 signatureParameters += parameter
             }
         }
-        if (kind == Kind.Method) {
-            val lambdaParameterNames = signatureParameters.joinToString { "_" + it.requireName() }
-            callArguments[function.parameters.indexOf(methodParameter)] = JPCodeBlock.of(
-                buildString {
-                    append("(_instance, \$L) -> ")
-                    if (methodLambdaReturnType.kotlinVersion == KPUnit) {
-                        append("{\n")
-                    }
-                    append("_original.call(\$L)")
-                    if (methodLambdaReturnType.kotlinVersion == KPUnit) {
-                        append(";\nreturn null;\n}")
-                    }
-                },
-                lambdaParameterNames,
-                lambdaParameterNames,
+        mixinMethodParameters.addAll(signatureParameters.map {
+            buildJavaParameter(it.type.asKJTypeName(), it.requireName())
+        })
+        if (hookAnnotation.kind == HookKind.WrapMethod) {
+            val originalParameter = function.parameters.singleOrNull { it.hasAnnotation<Wrap>() }
+            logger.require(originalParameter != null, function) {
+                "Functions annotated with ${Hook::class.atName} must have exactly one parameter annotated " +
+                    "with ${Wrap::class.atName}."
+            }
+            val originalType = originalParameter.type.asKJTypeName().kotlinVersion.safeAs<KPParameterizedTypeName>()
+                ?.rawType
+            logger.require(originalType == Original::class.asClassName(), originalParameter) {
+                "Hook parameters annotated with ${Wrap::class.atName} must be a ${Original::class.simpleName} type."
+            }
+            val originalRawType = originalType.asKJTypeName().javaVersion
+            val originalFunctionType = originalParameter.type.resolve().genericTypes().singleOrNull()
+            logger.require(originalFunctionType?.isFunctionType == true, originalParameter) {
+                "Hook parameters annotated with ${Wrap::class.atName} must be a function type."
+            }
+            val psiOriginalParameter = psiParameters.firstOrNull { it.name == originalParameter.requireName() }
+            logger.require(psiOriginalParameter != null, handleParameter) {
+                psiCompanion.resolvingError(originalParameter)
+            }
+            val psiOriginalOfLambda = psiOriginalParameter.defaultValue.safeAs<PsiCallExpression>()
+            val originalTopLevelFactoryName = nameOfCallable<(() -> () -> Unit) -> Original<() -> Unit>> {
+                ::originalOf
+            }
+            logger.require(psiOriginalOfLambda?.calleeName == originalTopLevelFactoryName, handleParameter) {
+                "Parameter ${originalParameter.requireName()} " +
+                    "must have $originalTopLevelFactoryName { ... } in default value."
+            }
+            mixinMethodParameters.add(
+                buildJavaParameter(
+                    Operation::class.asClassName().asKJClassName()
+                        .parameterizedBy(handleFunctionReturnType.boxed)
+                        .javaVersion,
+                    "_operation"
+                )
+            )
+            val genericsCount = originalFunctionType.genericTypes().size
+            val arity = genericsCount - 1
+            hookArgumentsArray[function.parameters.indexOf(originalParameter)] = NamedHookArgument(
+                originalRawType,
+                "_original",
+                if (arity > 22) {
+                    JPCodeBlock.of(
+                        "\$T.of(_operation, \$L)",
+                        originalRawType,
+                        arity
+                    )
+                } else {
+                    val argumentNames = signatureParameters.joinToString { "_" + it.requireName() }
+                    JPCodeBlock.of(
+                        "\$T.of(_operation, (\$T)(__instance, $argumentNames) -> _operation.call($argumentNames))",
+                        originalRawType,
+                        JPClassName.get("kotlin.jvm.functions", "Function$arity"),
+                    )
+                }
             )
         }
-        mixinMethodParameters.addAll(0, signatureParameters.map { signatureParameter ->
-            buildJavaParameter(signatureParameter.type.asKJTypeName(), signatureParameter.requireName())
-        })
-        val psiMethodLambdaParameter = PsiHelper.loadPsiFile(function)
-            .findPsiFunction { it.name == function.name }
-            ?.valueParameters
-            ?.firstOrNull { it.name == methodParameter.requireName() }
-        logger.kspRequire(psiMethodLambdaParameter != null, function) {
-            "Unable to resolve parameter from KSP in PSI system."
-        }
-        val psiCallable = psiMethodLambdaParameter.defaultValue
-        logger.kspRequire(psiCallable is PsiCallable, function) {
-            "Parameter ${methodParameter.requireName()} must have callable reference in default value."
-        }
-        val annotation = when {
-            kind == Kind.Method -> {
+        val annotation = when (hookAnnotation.kind) {
+            HookKind.WrapMethod -> {
                 buildJavaAnnotation<WrapMethod> {
                     addStringMember(
                         "method",
                         Descriptors.forMethod(
-                            psiCallable.callableReference.text,
+                            psiHandleCallable.callableReference.text,
                             null,
-                            methodLambdaGenericTypes.drop(1).dropLast(1),
-                            methodLambdaReturnType
+                            handleFunctionGenericTypes.drop(1).dropLast(1),
+                            handleFunctionReturnType
                         )
                     )
                 }
@@ -693,15 +749,23 @@ internal class LapisProcessor(
 
             else -> TODO()
         }
-        return buildJavaMethod(function.name.withModId()) {
+        return buildJavaMethod(function.name) {
             addAnnotation(annotation)
             addModifiers(Modifier.PRIVATE)
             addParameters(mixinMethodParameters)
+            hookArgumentsArray.filterIsInstance<NamedHookArgument>().forEach {
+                addStatement(
+                    "\$T \$L = \$L",
+                    it.type,
+                    it.name,
+                    it.value,
+                )
+            }
             addStatement(
                 "\$L.\$L(\$L)",
                 lazyPatchGetterCall,
                 function.name,
-                callArguments.joinToString { it.toString() },
+                hookArgumentsArray.joinToString { it?.statement.toString() },
             )
         }
     }
@@ -711,7 +775,7 @@ internal class LapisProcessor(
     ): JPMethod =
         buildJavaMethod(methodType.buildMethodName(propertyName)) {
             val isSetter = methodType == AccessorMethodType.SETTER
-            addAnnotation<AccessorAnnotation> {
+            addAnnotation<Accessor> {
                 addStringMember(DEFAULT_ANNOTATION_ELEMENT_NAME, target)
             }
             if (isSetter) {
@@ -733,7 +797,7 @@ internal class LapisProcessor(
     private fun buildInvokerMethod(
         target: String, isStatic: Boolean, returnType: KJTypeName?, name: String, parameters: List<JPParameter>,
     ): JPMethod =
-        buildJavaMethod(name.prefixed("invoke")) {
+        buildJavaMethod(name.capitalizeWithPrefix("invoke")) {
             addAnnotation<Invoker> {
                 addStringMember(DEFAULT_ANNOTATION_ELEMENT_NAME, target)
             }
@@ -760,31 +824,25 @@ internal class LapisProcessor(
             .apply(block)
     }
 
-    private fun accumulateAccessor(
+    private fun accumulateMixin(
+        side: PatchSide,
         className: KJClassName,
-        targetTypeName: KJTypeName,
-        block: GeneratedAccessor.() -> Unit,
-    ) {
-        accessors
-            .getOrPut(className) { GeneratedAccessor(targetTypeName) }
-            .apply(block)
-    }
-
-    private fun accumulatePatch(
-        className: KJClassName,
+        accessorClassName: KJClassName,
         targetTypeName: KJTypeName,
         patchTypeName: KJTypeName,
         implClassName: KJClassName,
         bridgeClassName: KJClassName,
-        block: GeneratedPatch.() -> Unit,
+        block: GeneratedMixin.() -> Unit,
     ) {
-        patches
+        mixins
             .getOrPut(className) {
-                GeneratedPatch(
+                GeneratedMixin(
+                    side = side,
                     targetTypeName = targetTypeName,
                     patchTypeName = patchTypeName,
                     implClassName = implClassName,
                     bridgeClassName = bridgeClassName,
+                    accessorClassName = accessorClassName,
                 )
             }
             .apply(block)
@@ -792,7 +850,7 @@ internal class LapisProcessor(
 
     private fun restrictMixinAnnotations(declaration: KspDeclaration) {
         mixinAnnotations.forEach { annotation ->
-            logger.kspRequire(!declaration.hasAnnotation(annotation), declaration) {
+            logger.require(!declaration.hasAnnotation(annotation), declaration) {
                 """
                 Direct use of Mixin or MixinExtras annotations is restricted.
                 The ${annotation.atName} annotation is managed internally by Lapis Hooks.
@@ -805,12 +863,11 @@ internal class LapisProcessor(
     private fun reset() {
         extensions.clear()
         factories.clear()
-        accessors.clear()
-        patches.clear()
+        mixins.clear()
 
         wideners.clear()
 
-        PsiHelper.destroy()
+        psiCompanion.destroy()
     }
 
     private fun String.withModId(): String =
@@ -822,7 +879,26 @@ internal class LapisProcessor(
         SETTER("set");
 
         fun buildMethodName(originalName: String): String =
-            originalName.prefixed(prefix)
+            originalName.capitalizeWithPrefix(prefix)
+    }
+
+    sealed interface HookArgument {
+        val statement: String
+    }
+
+    class NamedHookArgument(
+        val type: JPTypeName,
+        val name: String,
+        val value: JPCodeBlock,
+    ) : HookArgument {
+        override val statement: String = name
+    }
+
+    class InlineHookArgument(
+        val value: JPCodeBlock,
+    ) : HookArgument {
+        override val statement: String
+            get() = value.toString()
     }
 
     class GeneratedExtension(
@@ -845,25 +921,22 @@ internal class LapisProcessor(
             properties.isEmpty() && functions.isEmpty()
     }
 
-    class GeneratedAccessor(
-        val targetTypeName: KJTypeName,
-        val symbols: MutableSet<KspAnnotated> = mutableSetOf(),
-        val methods: MutableList<JPMethod> = mutableListOf(),
-    ) {
-        fun isEmpty(): Boolean =
-            methods.isEmpty()
-    }
-
-    class GeneratedPatch(
+    class GeneratedMixin(
+        val side: PatchSide,
         val targetTypeName: KJTypeName,
         val patchTypeName: KJTypeName,
         val implClassName: KJClassName,
         val bridgeClassName: KJClassName,
+        val accessorClassName: KJClassName,
         val symbols: MutableSet<KspAnnotated> = mutableSetOf(),
-        val methods: MutableList<JPMethod> = mutableListOf(),
+        val mixinMethods: MutableList<JPMethod> = mutableListOf(),
+        val accessorMethods: MutableList<JPMethod> = mutableListOf(),
+        val bridgeFunctions: MutableList<KPFunction> = mutableListOf(),
+        val implProperties: MutableList<KPProperty> = mutableListOf(),
+        val implFunctions: MutableList<KPFunction> = mutableListOf(),
     ) {
         fun isEmpty(): Boolean =
-            methods.isEmpty()
+            mixinMethods.isEmpty()
     }
 
     companion object {
@@ -880,7 +953,7 @@ internal class LapisProcessor(
             Shadow::class,
             SoftOverride::class,
             Unique::class,
-            AccessorAnnotation::class,
+            Accessor::class,
             Invoker::class,
             Inject::class,
             ModifyArg::class,

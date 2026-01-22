@@ -1,21 +1,19 @@
 package io.github.recrafter.lapis.extensions.ksp
 
-import com.google.devtools.ksp.processing.KSPLogger
-import com.google.devtools.ksp.symbol.KSNode
 import kotlin.contracts.ExperimentalContracts
 import kotlin.contracts.contract
 
 @OptIn(ExperimentalContracts::class)
-inline fun KSPLogger.kspRequire(condition: Boolean, symbol: KSNode, crossinline message: () -> String) {
+inline fun KspLogger.require(condition: Boolean, symbol: KspNode, crossinline message: () -> String) {
     contract {
         returns() implies condition
     }
     if (!condition) {
-        kspError(symbol, message)
+        error(symbol, message)
     }
 }
 
-inline fun KSPLogger.kspError(symbol: KSNode, crossinline message: () -> String): Nothing {
+inline fun KspLogger.error(symbol: KspNode, crossinline message: () -> String): Nothing {
     val message = message()
     error(message, symbol)
     throw IllegalStateException(message)

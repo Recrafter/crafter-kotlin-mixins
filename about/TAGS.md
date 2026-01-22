@@ -1,7 +1,7 @@
 kotlin-library
 ksp
 code-generation
-annotation-processor
+annotation-processing
 kotlin-extension
 minecraft
 minecraft-mod

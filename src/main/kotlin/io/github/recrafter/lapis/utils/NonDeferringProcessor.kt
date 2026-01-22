@@ -1,14 +1,14 @@
 package io.github.recrafter.lapis.utils
 
-import com.google.devtools.ksp.processing.Resolver
 import com.google.devtools.ksp.processing.SymbolProcessor
-import com.google.devtools.ksp.symbol.KSAnnotated
+import io.github.recrafter.lapis.extensions.ksp.KspAnnotated
+import io.github.recrafter.lapis.extensions.ksp.KspResolver
 
 abstract class NonDeferringProcessor : SymbolProcessor {
 
-    abstract fun run(resolver: Resolver)
+    abstract fun run(resolver: KspResolver)
 
-    final override fun process(resolver: Resolver): List<KSAnnotated> {
+    final override fun process(resolver: KspResolver): List<KspAnnotated> {
         run(resolver)
         return emptyList()
     }

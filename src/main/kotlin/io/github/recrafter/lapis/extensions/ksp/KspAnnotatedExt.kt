@@ -4,7 +4,6 @@ import com.google.devtools.ksp.KspExperimental
 import com.google.devtools.ksp.containingFile
 import com.google.devtools.ksp.getAnnotationsByType
 import com.google.devtools.ksp.isAnnotationPresent
-import com.google.devtools.ksp.processing.Dependencies
 import kotlin.reflect.KClass
 
 @OptIn(KspExperimental::class)
@@ -19,11 +18,11 @@ inline fun <reified A : Annotation> KspAnnotated.hasAnnotation(): Boolean =
 inline fun <reified A : Annotation> KspAnnotated.getSingleAnnotationOrNull(): A? =
     getAnnotationsByType(A::class).singleOrNull()
 
-fun Iterable<KspAnnotated>.toDependencies(aggregating: Boolean = false): Dependencies {
+fun Iterable<KspAnnotated>.toDependencies(aggregating: Boolean = false): KspDependencies {
     val containingFiles = mapNotNull { it.containingFile }
     return if (containingFiles.isNotEmpty()) {
-        Dependencies(aggregating, *containingFiles.toTypedArray())
+        KspDependencies(aggregating, *containingFiles.toTypedArray())
     } else {
-        Dependencies(aggregating)
+        KspDependencies(aggregating)
     }
 }

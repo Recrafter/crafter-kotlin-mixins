@@ -1,7 +1,7 @@
 package io.github.recrafter.lapis.extensions.psi
 
+typealias PsiFactory = org.jetbrains.kotlin.psi.KtPsiFactory
 typealias PsiFile = org.jetbrains.kotlin.psi.KtFile
-typealias PsiClass = org.jetbrains.kotlin.psi.KtClass
 typealias PsiFunction = org.jetbrains.kotlin.psi.KtFunction
-typealias PsiCallable = org.jetbrains.kotlin.psi.KtCallableReferenceExpression
-typealias PsiSuperTypeCallEntry = org.jetbrains.kotlin.psi.KtSuperTypeCallEntry
+typealias PsiCallableExpression = org.jetbrains.kotlin.psi.KtCallableReferenceExpression
+typealias PsiCallExpression = org.jetbrains.kotlin.psi.KtCallExpression

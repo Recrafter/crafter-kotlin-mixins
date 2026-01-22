@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.projektor)
     alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
 
@@ -13,12 +14,15 @@ dependencies {
 
     implementation(libs.mixin)
     implementation(libs.mixin.extras)
+    implementation(libs.lapis.api)
 
     implementation(libs.java.poet)
     implementation(libs.kotlin.poet.ksp)
 
+    implementation(libs.kotlin.serialization.json)
+
     ksp(libs.auto.service)
-    implementation(libs.auto.service.annotations)
+    compileOnly(libs.auto.service.annotations)
 }
 
 projekt {

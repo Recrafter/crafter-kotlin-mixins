@@ -1,10 +1,9 @@
 package io.github.recrafter.lapis.extensions.ksp
 
-import com.google.devtools.ksp.symbol.KSTypeReference
 import io.github.recrafter.lapis.kj.KJTypeName
 
-val KSTypeReference.qualifiedName: String
+val KspTypeReference.qualifiedName: String
     get() = resolve().declaration.requireQualifiedName()
 
-fun KSTypeReference.asKJTypeName(): KJTypeName =
+fun KspTypeReference.asKJTypeName(): KJTypeName =
     resolve().asKJTypeName()

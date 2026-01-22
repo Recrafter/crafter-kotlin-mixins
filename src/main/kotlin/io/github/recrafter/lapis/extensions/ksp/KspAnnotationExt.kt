@@ -1,16 +1,18 @@
 package io.github.recrafter.lapis.extensions.ksp
 
-import com.google.devtools.ksp.symbol.KSType
+import org.jetbrains.kotlin.utils.addToStdlib.UnsafeCastFunction
+import org.jetbrains.kotlin.utils.addToStdlib.safeAs
 
-fun KspAnnotation.getClassDeclarationArgumentOrNull(argumentName: String): KspClass? {
-    val ksType = arguments
-        .firstOrNull { it.name?.asString() == argumentName }
-        ?.value as? KSType
-        ?: return null
-    return ksType.declaration as? KspClass
-}
+@OptIn(UnsafeCastFunction::class)
+fun KspAnnotation.getKspClassArgumentOrNull(name: String): KspClass? =
+    arguments
+        .firstOrNull { it.requireName() == name }
+        ?.value
+        ?.safeAs<KspType>()
+        ?.declaration
+        ?.safeAs<KspClass>()
 
-fun KspAnnotation.getClassDeclarationArgument(argumentName: String): KspClass =
-    requireNotNull(getClassDeclarationArgumentOrNull(argumentName)) {
-        "Class declaration argument '$argumentName' not found"
+fun KspAnnotation.getKspClassArgument(name: String): KspClass =
+    requireNotNull(getKspClassArgumentOrNull(name)) {
+        "Class declaration argument '$name' not found"
     }

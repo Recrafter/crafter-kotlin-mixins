@@ -39,7 +39,7 @@ private val KJTypeName.descriptor: String
         JPChar -> "C"
         JPFloat -> "F"
         JPDouble -> "D"
-        else -> className?.let {
-            "L" + it.qualifiedName.replace(".", "/") + ";"
-        } ?: error("Unsupported type: $javaVersion")
+        else -> className
+            ?.let { "L" + it.qualifiedName.replace(".", "/") + ";" }
+            ?: error("Unsupported type: $javaVersion")
     }

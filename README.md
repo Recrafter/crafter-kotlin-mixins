@@ -20,8 +20,8 @@ ksp {
     // Required: specify your mod ID
     arg("lapis.modId", "cobbble")
 
-    // Required: specify your mod package name (maven group)
-    arg("lapis.packageName", "io.github.recrafter.cobbble")
+    // Required: specify your mixins package (from {modId}.mixins.json)
+    arg("lapis.mixinsPackage", "io.github.recrafter.cobbble.mixins")
 }
 ```
 

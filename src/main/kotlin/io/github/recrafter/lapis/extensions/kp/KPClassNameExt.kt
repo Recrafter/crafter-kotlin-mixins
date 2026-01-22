@@ -3,7 +3,6 @@ package io.github.recrafter.lapis.extensions.kp
 import io.github.recrafter.lapis.extensions.jp.JPBoolean
 import io.github.recrafter.lapis.extensions.jp.JPByte
 import io.github.recrafter.lapis.extensions.jp.JPChar
-import io.github.recrafter.lapis.extensions.jp.JPClassName
 import io.github.recrafter.lapis.extensions.jp.JPDouble
 import io.github.recrafter.lapis.extensions.jp.JPFloat
 import io.github.recrafter.lapis.extensions.jp.JPInt

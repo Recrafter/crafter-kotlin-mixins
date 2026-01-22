@@ -1,8 +1,6 @@
 package io.github.recrafter.lapis.extensions.ksp
 
-import com.google.devtools.ksp.processing.Resolver
-
-inline fun <reified A : Annotation> Resolver.forEachSymbolsAnnotatedWith(
+inline fun <reified A : Annotation> KspResolver.forEachSymbolsAnnotatedWith(
     crossinline action: (
         symbol: KspAnnotated,
         annotation: A,
